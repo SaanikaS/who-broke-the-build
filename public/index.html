@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Who Broke the Build?</title>
+<style>
+:root{--bg:#0f1115;--card:#181b22;--tx:#e6e8ee;--mu:#8b93a7;--ac:#e07b39;--bd:#2a2f3a}
+@media(prefers-color-scheme:light){:root{--bg:#f6f7f9;--card:#fff;--tx:#1b1e25;--mu:#5d6475;--bd:#dde1e8}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+header{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--bd)}
+h1{font-size:18px;margin:0;color:var(--ac);flex:1}
+nav{display:flex;gap:6px;padding:10px 20px;flex-wrap:wrap}
+button,select,input,textarea{font:inherit;background:var(--card);color:var(--tx);border:1px solid var(--bd);border-radius:6px;padding:6px 10px}
+button{cursor:pointer}button.on,button.pri{background:var(--ac);color:#fff;border-color:var(--ac)}
+main{padding:0 20px 40px;max-width:1100px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px}.card b{display:block;font-size:26px}.card span{color:var(--mu)}
+.wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;background:var(--card)}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--bd)}th{color:var(--mu);font-weight:500}
+.badge{padding:2px 8px;border-radius:99px;font-size:12px;background:var(--bd)}
+.critical,.failed,.rolled_back{background:#c0392b;color:#fff}.high{background:#e07b39;color:#fff}.success,.resolved{background:#2e8b57;color:#fff}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+a{color:var(--ac)}.err{color:#e5534b}.mu{color:var(--mu)}
+.upd{border-left:3px solid var(--bd);padding:4px 10px;margin:6px 0}
+</style></head>
+<body>
+<header><h1>Who Broke the Build?</h1>
+  <select id="proj" onchange="pick(this.value)"></select><button onclick="newProject()">+ Project</button>
+  <label class="mu">Acting as <select id="usr" onchange="S.user=this.value;render()"></select></label></header>
+<nav id="nav"></nav><main id="main"></main>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const S={user:1,pid:null,tab:'dashboard',inc:null,es:null,users:[]};
+const TABS=['dashboard','timeline','incidents','deployments','changes'];
+const H=h=>({h}), cell=c=>c&&typeof c==='object'&&'h' in c?c.h:esc(c);
+const table=(head,rows)=>`<div class=wrap><table><tr>${head.map(x=>`<th>${x}</th>`).join('')}</tr>${rows.map(r=>`<tr>${r.map(c=>`<td>${cell(c)}</td>`).join('')}</tr>`).join('')||`<tr><td colspan=${head.length} class=mu>Nothing yet</td></tr>`}</table></div>`;
+const badge=v=>H(`<span class="badge ${esc(v)}">${esc(v)}</span>`);
+const card=(l,v)=>`<div class=card><b>${esc(v)}</b><span>${l}</span></div>`;
+const val=id=>$('#'+id).value, iso=v=>v?new Date(v).toISOString():undefined;
+const fmt=t=>t?new Date(t).toLocaleString():'-';
+async function api(m,p,b){
+  const r=await fetch('/api'+p,{method:m,headers:{'content-type':'application/json','x-user-id':S.user},body:b?JSON.stringify(b):undefined});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){const e=new Error(j.error||r.statusText);e.status=r.status;throw e}
+  return j;
+}
+async function act(fn){try{await fn()}catch(e){alert(e.message);if(e.status===409)render()}}
+
+const views={
+  async dashboard(){
+    const d=await api('GET',`/projects/${S.pid}/dashboard`);
+    $('#main').innerHTML=`<div class=cards>${card('Open incidents',d.open)}${card('Critical open',d.critical_open)}${card('MTTR (min)',d.mttr_minutes==null?'-':d.mttr_minutes)}${card('Deployments (7d)',d.deploys_7d)}</div>
+    <h3>Most suspected deployments</h3>${table(['Version','Env','Deployed','Linked incidents','Top score'],d.risky.map(r=>[r.version,r.environment,fmt(r.deployed_at),r.incidents,r.top_score]))}
+    <h3>Recurring issues</h3>${table(['Issue','Reports','Last seen'],d.recurring.map(r=>[r.title,r.occurrences,fmt(r.last_seen)]))}
+    <h3>Recent deployments</h3>${table(['Version','Env','Status','When','By'],d.recent.map(r=>[r.version,r.environment,badge(r.status),fmt(r.deployed_at),r.deployed_by]))}`;
+  },
+  async timeline(){
+    const t=await api('GET',`/projects/${S.pid}/timeline`);
+    $('#main').innerHTML='<h3>Event timeline <span class=mu>(ordered by when it happened, not when it arrived)</span></h3>'+table(['When','Type','Event','Detail'],t.map(e=>[fmt(e.ts),badge(e.kind),e.title,e.detail]));
+  },
+  async incidents(){
+    const r=await api('GET',`/projects/${S.pid}/incidents`);
+    $('#main').innerHTML=`<h3>Report an incident</h3><div class=row><input id=it placeholder="Title" size=30><select id=isv><option>low<option selected>medium<option>high<option>critical</select><input id=iat type=datetime-local title="When it started"><button class=pri onclick="addInc()">Report</button></div>`+
+    table(['#','Title','Severity','Status','Reports','Started'],r.map(i=>[i.id,H(`<a href="#" onclick="openInc(${i.id});return false">${esc(i.title)}</a>`),badge(i.severity),badge(i.status),i.report_count,fmt(i.occurred_at)]));
+  },
+  async incident(){
+    const i=await api('GET','/incidents/'+S.inc);
+    const opts=(a,c)=>a.map(s=>`<option ${s===c?'selected':''}>${s}</option>`).join('');
+    $('#main').innerHTML=`<p><a href="#" onclick="S.tab='incidents';render();return false">&larr; incidents</a></p>
+    <h2>#${i.id} ${esc(i.title)} ${badge(i.severity).h}</h2>
+    <p class=mu>Started ${fmt(i.occurred_at)} &middot; reported ${fmt(i.reported_at)} &middot; ${i.report_count} report(s) &middot; v${i.version}</p>
+    <div class=row><select id=ist>${opts(['open','investigating','identified','resolved'],i.status)}</select>
+    <select id=isv2>${opts(['low','medium','high','critical'],i.severity)}</select>
+    <select id=ias multiple size=3>${S.users.map(u=>`<option value=${u.id} ${i.assignees.includes(u.id)?'selected':''}>${esc(u.name)}</option>`).join('')}</select>
+    <input id=ires placeholder="Resolution details" value="${esc(i.resolution||'')}" size=40><button class=pri onclick="saveInc(${i.id},${i.version})">Save</button></div>
+    <h3>Suspected deployments / changes</h3>`+
+    table(['Type','What','When','Score','Why'],i.suspects.map(s=>[s.kind,s.kind==='deployment'?`${s.version||'?'} (${s.environment})`:`${s.message||''} - ${s.author||''}`,fmt(s.deployed_at),s.score,s.reason]))+
+    `<div class=row><button onclick="recorr(${i.id})">Re-run correlation</button></div><h3>Activity</h3>`+
+    i.updates.map(u=>`<div class=upd><b>${esc(u.user_name||'system')}</b> <span class=mu>${esc(u.kind)} &middot; ${fmt(u.created_at)}</span><br>${esc(u.body)}</div>`).join('')+
+    `<div class=row><input id=ic size=50 placeholder="Add an update..."><button onclick="addUpd(${i.id})">Post</button></div>`;
+  },
+  async deployments(){
+    const r=await api('GET',`/projects/${S.pid}/deployments`);
+    $('#main').innerHTML=`<h3>Record a deployment</h3><div class=row><input id=dv placeholder="Version"><input id=de value=production size=10><select id=ds><option>success<option>failed<option>rolled_back<option>pending</select><input id=dc placeholder="Commit SHA" size=10><input id=db placeholder="Deployed by" size=10><input id=dt type=datetime-local><button class=pri onclick="addDep()">Add</button></div>`+
+    table(['Version','Env','Status','Commit','By','When'],r.map(d=>[d.version,d.environment,badge(d.status),(d.commit_sha||'').slice(0,7),d.deployed_by,fmt(d.deployed_at)]));
+  },
+  async changes(){
+    const r=await api('GET',`/projects/${S.pid}/changes`);
+    $('#main').innerHTML=`<h3>Record a code change</h3><div class=row><input id=cs placeholder="Commit SHA" size=10><input id=cm placeholder="Message" size=40><input id=ca placeholder="Author" size=10><input id=ct type=datetime-local><button class=pri onclick="addChg()">Add</button></div>`+
+    table(['Commit','Message','Author','When'],r.map(c=>[(c.commit_sha||'').slice(0,7),c.message,c.author,fmt(c.committed_at)]));
+  },
+};
+async function render(){
+  if(!S.pid){$('#main').innerHTML='<p>Create a project to begin.</p>';return}
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.t===S.tab));
+  try{await views[S.tab]()}catch(e){$('#main').innerHTML='<p class=err>'+esc(e.message)+'</p>'}
+}
+const openInc=id=>{S.inc=id;S.tab='incident';render()};
+const addInc=()=>act(async()=>{const r=await api('POST',`/projects/${S.pid}/incidents`,{title:val('it'),severity:val('isv'),occurred_at:iso(val('iat'))});if(r.duplicate)alert('Merged into existing open incident #'+r.id);render()});
+const saveInc=(id,v)=>act(async()=>{await api('PATCH','/incidents/'+id,{version:v,status:val('ist'),severity:val('isv2'),resolution:val('ires')||undefined,assignees:[...$('#ias').selectedOptions].map(o=>+o.value)});render()});
+const addUpd=id=>act(async()=>{await api('POST',`/incidents/${id}/updates`,{body:val('ic'),client_id:Date.now()+'-'+Math.random()});render()});
+const recorr=id=>act(async()=>{await api('POST',`/incidents/${id}/correlate`);render()});
+const addDep=()=>act(async()=>{await api('POST',`/projects/${S.pid}/deployments`,{version:val('dv'),environment:val('de'),status:val('ds'),commit_sha:val('dc')||undefined,deployed_by:val('db')||undefined,deployed_at:iso(val('dt'))});render()});
+const addChg=()=>act(async()=>{await api('POST',`/projects/${S.pid}/changes`,{external_id:val('cs')?'commit:'+val('cs'):undefined,commit_sha:val('cs')||undefined,message:val('cm'),author:val('ca')||undefined,committed_at:iso(val('ct'))});render()});
+const newProject=()=>{const name=prompt('Project name');if(name)act(async()=>{const p=await api('POST','/projects',{name,repo_url:prompt('Repo URL (optional)')||undefined});loadProjects(p.id)})};
+function pick(v){S.pid=+v;S.tab='dashboard';connect();render()}
+function connect(){ // real-time updates via Server-Sent Events
+  if(S.es)S.es.close(); if(!S.pid)return;
+  S.es=new EventSource(`/api/projects/${S.pid}/stream`);
+  S.es.onmessage=()=>{if(!document.activeElement.matches('input,textarea,select'))render()};
+}
+async function loadProjects(sel){
+  const ps=await api('GET','/projects');
+  $('#proj').innerHTML=ps.map(p=>`<option value=${p.id}>${esc(p.name)} (${p.open_incidents} open)</option>`).join('');
+  S.pid=sel||(ps[0]&&ps[0].id)||null; if(S.pid)$('#proj').value=S.pid;
+  connect();render();
+}
+(async()=>{
+  S.users=await api('GET','/users');
+  $('#usr').innerHTML=S.users.map(u=>`<option value=${u.id}>${esc(u.name)} (${u.role})</option>`).join('');
+  $('#nav').innerHTML=TABS.map(t=>`<button data-t=${t} onclick="S.tab='${t}';render()">${t}</button>`).join('');
+  loadProjects();
+})();
+</script></body></html>
